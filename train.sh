@@ -1,0 +1,1 @@
+python train.py  --train_path /home/wxl/Data/CVUSA/bingmap/20/
