@@ -44,9 +44,10 @@ from copy import deepcopy
 from pathlib import Path
 import torch
 from torch import nn
+from typing import List, Tuple
 
 
-def MLP(channels: list, do_bn=True):
+def MLP(channels: List[int], do_bn: bool = True) -> nn.Module:
     """ Multi-layer perceptron """
     n = len(channels)
     layers = []
@@ -55,8 +56,7 @@ def MLP(channels: list, do_bn=True):
             nn.Conv1d(channels[i - 1], channels[i], kernel_size=1, bias=True))
         if i < (n-1):
             if do_bn:
-                # layers.append(nn.BatchNorm1d(channels[i]))
-                layers.append(nn.InstanceNorm1d(channels[i]))
+                layers.append(nn.BatchNorm1d(channels[i]))
             layers.append(nn.ReLU())
     return nn.Sequential(*layers)
 
@@ -71,6 +71,7 @@ def normalize_keypoints(kpts, image_shape):
     return (kpts - center[:, None, :]) / scaling[:, None, :]
 
 
+
 class KeypointEncoder(nn.Module):
     """ Joint encoding of visual appearance and location using MLPs"""
     def __init__(self, feature_dim, layers):
@@ -80,6 +81,7 @@ class KeypointEncoder(nn.Module):
 
     def forward(self, kpts, scores):
         inputs = [kpts.transpose(1, 2), scores.unsqueeze(1)]
+        # print(inputs[0].shape, inputs[1].shape)
         return self.encoder(torch.cat(inputs, dim=1))
 
 
@@ -196,9 +198,9 @@ class SuperGlue(nn.Module):
 
     """
     default_config = {
-        'descriptor_dim': 128,
+        'descriptor_dim': 256,
         'weights': 'indoor',
-        'keypoint_encoder': [32, 64, 128],
+        'keypoint_encoder': [32, 64, 128,256],
         'GNN_layers': ['self', 'cross'] * 9,
         'sinkhorn_iterations': 100,
         'match_threshold': 0.2,
@@ -221,20 +223,22 @@ class SuperGlue(nn.Module):
         bin_score = torch.nn.Parameter(torch.tensor(1.))
         self.register_parameter('bin_score', bin_score)
 
-        # assert self.config['weights'] in ['indoor', 'outdoor']
-        # path = Path(__file__).parent
-        # path = path / 'weights/superglue_{}.pth'.format(self.config['weights'])
+        assert self.config['weights'] in ['indoor', 'outdoor']
+        path = Path(__file__).parent
+        path = path / 'weights/superglue_{}.pth'.format(self.config['weights'])
         # self.load_state_dict(torch.load(path))
-        # print('Loaded SuperGlue model (\"{}\" weights)'.format(
-        #     self.config['weights']))
+        print('Loaded SuperGlue model (\"{}\" weights)'.format(
+            self.config['weights']))
 
     def forward(self, data):
         """Run SuperGlue on a pair of keypoints and descriptors"""
-        desc0, desc1 = data['descriptors0'].double(), data['descriptors1'].double()
-        kpts0, kpts1 = data['keypoints0'].double(), data['keypoints1'].double()
+        # desc0, desc1 = data['descriptors0'].double(), data['descriptors1'].double()
+        # kpts0, kpts1 = data['keypoints0'].double(), data['keypoints1'].double()
+        desc0, desc1 = data['descriptors0'], data['descriptors1']
+        kpts0, kpts1 = data['keypoints0'], data['keypoints1']
 
-        desc0 = desc0.transpose(0,1)
-        desc1 = desc1.transpose(0,1)
+        # desc0 = desc0.transpose(0,1)
+        # desc1 = desc1.transpose(0,1)
         kpts0 = torch.reshape(kpts0, (1, -1, 2))
         kpts1 = torch.reshape(kpts1, (1, -1, 2))
     
@@ -248,16 +252,29 @@ class SuperGlue(nn.Module):
                 'skip_train': True
             }
 
-        file_name = data['file_name']
-        all_matches = data['all_matches'].permute(1,2,0) # shape=torch.Size([1, 87, 2])
+        # file_name = data['file_name']
         
         # Keypoint normalization.
         kpts0 = normalize_keypoints(kpts0, data['image0'].shape)
         kpts1 = normalize_keypoints(kpts1, data['image1'].shape)
 
         # Keypoint MLP encoder.
-        desc0 = desc0 + self.kenc(kpts0, torch.transpose(data['scores0'], 0, 1))
-        desc1 = desc1 + self.kenc(kpts1, torch.transpose(data['scores1'], 0, 1))
+        # print(data['scores0'].shape)
+        # print(self.kenc(kpts0,data['scores0']).shape)
+        # # print(self.kenc(kpts0, torch.transpose(data['scores0'], 0, 1)).shape)
+        # print(desc0.shape)
+        
+        # print(data['scores1'].shape)
+        # print(self.kenc(kpts1,data['scores1']).shape)
+        # # print(self.kenc(kpts0, torch.transpose(data['scores0'], 0, 1)).shape)
+        # print(desc1.shape)
+        
+        # desc0 = desc0 + self.kenc(kpts0, torch.transpose(data['scores0'], 0, 1))
+        # desc1 = desc1 + self.kenc(kpts1, torch.transpose(data['scores1'], 0, 1))
+        desc0 = desc0 + self.kenc(kpts0,data['scores0'])
+        desc1 = desc1 + self.kenc(kpts1, data['scores1'])
+        
+        
 
         # Multi-layer Transformer network.
         desc0, desc1 = self.gnn(desc0, desc1)
@@ -287,25 +304,47 @@ class SuperGlue(nn.Module):
         indices0 = torch.where(valid0, indices0, indices0.new_tensor(-1))
         indices1 = torch.where(valid1, indices1, indices1.new_tensor(-1))
 
-        # check if indexed correctly
-        loss = []
-        for i in range(len(all_matches[0])):
-            x = all_matches[0][i][0]
-            y = all_matches[0][i][1]
-            loss.append(-torch.log( scores[0][x][y].exp() )) # check batch size == 1 ?
-        # for p0 in unmatched0:
-        #     loss += -torch.log(scores[0][p0][-1])
-        # for p1 in unmatched1:
-        #     loss += -torch.log(scores[0][-1][p1])
-        loss_mean = torch.mean(torch.stack(loss))
-        loss_mean = torch.reshape(loss_mean, (1, -1))
-        return {
-            'matches0': indices0[0], # use -1 for invalid match
-            'matches1': indices1[0], # use -1 for invalid match
-            'matching_scores0': mscores0[0],
-            'matching_scores1': mscores1[0],
-            'loss': loss_mean[0],
-            'skip_train': False
-        }
+        if self.training:   
+            all_matches = data['all_matches'].permute(1,2,0) # shape=torch.Size([1, 87, 2])
+            # check if indexed correctly
+            loss = []
+            for i in range(len(all_matches[0])):
+                x = all_matches[0][i][0]
+                y = all_matches[0][i][1]
+                loss_temp = -torch.log( scores[0][x][y].exp() )
+                if torch.isnan(loss_temp):
+                    continue
+                loss.append(-torch.log( scores[0][x][y].exp() )) # check batch size == 1 ?
+            # for p0 in unmatched0:
+            #     loss += -torch.log(scores[0][p0][-1])
+            # for p1 in unmatched1:
+            #     loss += -torch.log(scores[0][-1][p1])
+            if loss == []:
+                shape0, shape1 = kpts0.shape[:-1], kpts1.shape[:-1]
+                return {
+                'matches0': kpts0.new_full(shape0, -1, dtype=torch.int)[0],
+                'matches1': kpts1.new_full(shape1, -1, dtype=torch.int)[0],
+                'matching_scores0': kpts0.new_zeros(shape0)[0],
+                'matching_scores1': kpts1.new_zeros(shape1)[0],
+                'skip_train': True
+            }
+            loss_mean = torch.mean(torch.stack(loss))
+            loss_mean = torch.reshape(loss_mean, (1, -1))
+            return {
+                'matches0': indices0[0], # use -1 for invalid match
+                'matches1': indices1[0], # use -1 for invalid match
+                'matching_scores0': mscores0[0],
+                'matching_scores1': mscores1[0],
+                'loss': loss_mean[0],
+                'skip_train': False
+            }
+        else:
+            return {
+                'matches0': indices0, # use -1 for invalid match
+                'matches1': indices1, # use -1 for invalid match
+                'matching_scores0': mscores0,
+                'matching_scores1': mscores1
+            }
+            
 
         # scores big value or small value means confidence? log can't take neg value

@@ -281,6 +281,25 @@ def read_image(path, resize, rotation, resize_float):
     inp = frame2tensor(image)
     return image, inp, scales
 
+def read_image_wxl(image, resize, rotation, resize_float):
+    if image is None:
+        return None, None, None
+    w, h = image.shape[1], image.shape[0]
+    w_new, h_new = process_resize(w, h, resize)
+    scales = (float(w) / float(w_new), float(h) / float(h_new))
+
+    if resize_float:
+        image = cv2.resize(image.astype('float32'), (w_new, h_new))
+    else:
+        image = cv2.resize(image, (w_new, h_new)).astype('float32')
+
+    if rotation != 0:
+        image = np.rot90(image, k=rotation)
+        if rotation % 2:
+            scales = scales[::-1]
+
+    inp = frame2tensor(image)
+    return image, inp, scales
 
 
 def read_image_modified(image, resize, resize_float):

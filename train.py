@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 from load_data import SparseDataset
+from load_data_wxl import SparseDatasetWxl
+# from load_data_cvusa import SparseDatasetWxl
 import os
 import torch.multiprocessing
 from tqdm import tqdm
@@ -118,7 +120,7 @@ parser.add_argument(
 
 if __name__ == '__main__':
     opt = parser.parse_args()
-    print(opt)
+    # print(opt)
 
     # make sure the flags are properly used
     assert not (opt.opencv_display and not opt.viz), 'Must use --viz with --opencv_display'
@@ -145,7 +147,9 @@ if __name__ == '__main__':
     }
 
     # load training data
-    train_set = SparseDataset(opt.train_path, opt.max_keypoints)
+    # train_set = SparseDataset(opt.train_path, opt.max_keypoints)
+    # train_set = SparseDatasetWxl(opt.train_path, config)
+    train_set = SparseDatasetWxl(opt.train_path, config)
     train_loader = torch.utils.data.DataLoader(dataset=train_set, shuffle=False, batch_size=opt.batch_size, drop_last=True)
 
     superglue = SuperGlue(config.get('superglue', {}))
@@ -160,8 +164,14 @@ if __name__ == '__main__':
     # start training
     for epoch in range(1, opt.epoch+1):
         epoch_loss = 0
-        superglue.double().train()
-        for i, pred in enumerate(train_loader):
+        # superglue.double().train()
+        superglue.train()
+        loop = tqdm(enumerate(train_loader), total=len(train_loader))
+
+        # for i, pred in enumerate(train_loader):
+        for i,pred in loop:
+            loop.set_description(f'Epoch [{epoch}/{opt.epoch}]')
+            # print(Variable(torch.stack(pred["scores0"]).cuda()).shape)
             for k in pred:
                 if k != 'file_name' and k!='image0' and k!='image1':
                     if type(pred[k]) == torch.Tensor:
@@ -185,11 +195,11 @@ if __name__ == '__main__':
             superglue.zero_grad()
             Loss.backward()
             optimizer.step()
-
+            loop.set_postfix(loss=torch.mean(torch.stack(mean_loss)).item())
             # for every 50 images, print progress and visualize the matches
             if (i+1) % 50 == 0:
-                print ('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}' 
-                    .format(epoch, opt.epoch, i+1, len(train_loader), torch.mean(torch.stack(mean_loss)).item())) 
+                # print ('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}' 
+                #     .format(epoch, opt.epoch, i+1, len(train_loader), torch.mean(torch.stack(mean_loss)).item())) 
                 mean_loss = []
 
                 ### eval ###
@@ -198,8 +208,10 @@ if __name__ == '__main__':
                 image0, image1 = pred['image0'].cpu().numpy()[0]*255., pred['image1'].cpu().numpy()[0]*255.
                 kpts0, kpts1 = pred['keypoints0'].cpu().numpy()[0], pred['keypoints1'].cpu().numpy()[0]
                 matches, conf = pred['matches0'].cpu().detach().numpy(), pred['matching_scores0'].cpu().detach().numpy()
-                image0 = read_image_modified(image0, opt.resize, opt.resize_float)
-                image1 = read_image_modified(image1, opt.resize, opt.resize_float)
+                # image0 = read_image_modified(image0, opt.resize, opt.resize_float)
+                # image1 = read_image_modified(image1, opt.resize, opt.resize_float)
+                image0 = read_image_modified(image0, [-1], opt.resize_float)
+                image1 = read_image_modified(image1,  [-1], opt.resize_float)
                 valid = matches > -1
                 mkpts0 = kpts0[valid]
                 mkpts1 = kpts1[matches[valid]]
@@ -213,18 +225,24 @@ if __name__ == '__main__':
                     image0, image1, kpts0, kpts1, mkpts0, mkpts1, color,
                     text, viz_path, stem, stem, opt.show_keypoints,
                     opt.fast_viz, opt.opencv_display, 'Matches')
+                superglue.train()
 
             # process checkpoint for every 5e3 images
-            if (i+1) % 5e3 == 0:
+            if (i+1) % 1e3 == 0: # 5e3 
+                superglue.eval()
                 model_out_path = "model_epoch_{}.pth".format(epoch)
-                torch.save(superglue, model_out_path)
+                state_dict = superglue.state_dict()
+                torch.save(state_dict, model_out_path)
+                # torch.save(superglue, model_out_path)
                 print ('Epoch [{}/{}], Step [{}/{}], Checkpoint saved to {}' 
                     .format(epoch, opt.epoch, i+1, len(train_loader), model_out_path)) 
+                superglue.train()
 
         # save checkpoint when an epoch finishes
         epoch_loss /= len(train_loader)
         model_out_path = "model_epoch_{}.pth".format(epoch)
-        torch.save(superglue, model_out_path)
+        state_dict = superglue.state_dict()
+        torch.save(state_dict, model_out_path)
         print("Epoch [{}/{}] done. Epoch Loss {}. Checkpoint saved to {}"
             .format(epoch, opt.epoch, epoch_loss, model_out_path))
         
